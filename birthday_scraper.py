@@ -5,8 +5,12 @@ import os
 
 def get_birthdays(month: str, day: int):
     url = f"https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{month}_{day}"
-    r = requests.get(url)
-    soup = BeautifulSoup(r.content, 'html.parser')
+headers = {
+    'User-Agent': 'daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)'
+}
+r = requests.get(url, headers=headers)
+soup = BeautifulSoup(r.content, 'html.parser')
+
 
     # Find "Births" section
     births_section = soup.find('span', {'id': 'Births'})
