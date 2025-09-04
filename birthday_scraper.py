@@ -49,7 +49,7 @@ if not birthday_list:
     exit()
 
 # Create output folder if missing
-output_folder = "birthdays"
+output_folder = "docs/birthdays"
 os.makedirs(output_folder, exist_ok=True)
 
 # Construct file name like 'september-4.html'
