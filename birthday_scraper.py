@@ -42,6 +42,12 @@ day = today.day
 # Get birthday data
 birthday_list = get_birthdays(month.capitalize(), day)
 
+print(f"Found {len(birthday_list)} birthdays.")
+
+if not birthday_list:
+    print("No birthdays found for today. Skipping file generation.")
+    exit()
+
 # Create output folder if missing
 output_folder = "birthdays"
 os.makedirs(output_folder, exist_ok=True)
