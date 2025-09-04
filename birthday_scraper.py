@@ -18,7 +18,7 @@ def get_birthdays(month: str, day: int):
 
     ul = births_section.find_next('ul')
     items = ul.find_all('li')
-    
+
     birthdays = []
     for item in items:
         text = item.get_text()
@@ -36,18 +36,22 @@ def get_birthdays(month: str, day: int):
 
 # Prepare today's date
 today = datetime.date.today()
-month = today.strftime("%B")
+month = today.strftime("%B").lower()
 day = today.day
 
 # Get birthday data
-birthday_list = get_birthdays(month, day)
+birthday_list = get_birthdays(month.capitalize(), day)
 
 # Create output folder if missing
 output_folder = "birthdays"
 os.makedirs(output_folder, exist_ok=True)
 
+# Construct file name like 'september-4.html'
+filename = f"{month}-{day}.html"
+file_path = os.path.join(output_folder, filename)
+
 # Write to HTML file
-with open(os.path.join(output_folder, "today.html"), "w", encoding="utf-8") as f:
+with open(file_path, "w", encoding="utf-8") as f:
     f.write("<div class='birthdays'>\n<h3>🎉 Celebrity Birthdays – ")
     f.write(today.strftime("%B %d"))
     f.write("</h3>\n<ul>\n")
