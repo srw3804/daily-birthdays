@@ -28,4 +28,29 @@ def get_birthdays(month: str, day: int):
             try:
                 birth_year = int(year_str.strip())
                 age = datetime.datetime.now().year - birth_year
-                birthdays.append((birth_year, age, d_
+                birthdays.append((birth_year, age, description.strip()))
+            except ValueError:
+                continue
+
+    return birthdays
+
+# Prepare today's date
+today = datetime.date.today()
+month = today.strftime("%B")
+day = today.day
+
+# Get birthday data
+birthday_list = get_birthdays(month, day)
+
+# Create output folder if missing
+output_folder = "birthdays"
+os.makedirs(output_folder, exist_ok=True)
+
+# Write to HTML file
+with open(os.path.join(output_folder, "today.html"), "w", encoding="utf-8") as f:
+    f.write("<div class='birthdays'>\n<h3>🎉 Celebrity Birthdays – ")
+    f.write(today.strftime("%B %d"))
+    f.write("</h3>\n<ul>\n")
+    for birth_year, age, desc in birthday_list:
+        f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
+    f.write("</ul>\n</div>")
