@@ -30,6 +30,6 @@ jobs:
         run: |
           git config --global user.name 'github-actions'
           git config --global user.email 'github-actions@github.com'
-          git add birthdays/*.html
-          git commit -m "Daily birthday update"
+          git add docs/birthdays/*.html
+          git commit -m "Daily birthday update" || echo "Nothing to commit"
           git push
