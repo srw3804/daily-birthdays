@@ -35,9 +35,9 @@ def get_birthdays(month: str, day: int):
     return birthdays
 
 # Prepare today's date
-today = datetime.date.today()
-month = today.strftime("%B").lower()
-day = today.day
+month = september
+day = 4
+today = datetime.date (2025, 9, 4)
 
 # Get birthday data
 birthday_list = get_birthdays(month.capitalize(), day)
