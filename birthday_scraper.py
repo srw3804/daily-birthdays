@@ -7,18 +7,16 @@ from bs4 import BeautifulSoup
 API = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
 
-# --- Text cleaning helpers ---
-# Footnotes can appear as [5] or [ 5 ] etc.
-FOOTNOTE_RE = re.compile(r"\s*\[\s*\d+\s*\]\s*")
+# --- Regex patterns ---
+FOOTNOTE_RE = re.compile(r"\s*\[\s*\d+\s*\]\s*")  # remove [5], [ 5 ], etc.
 DECEASED_RE = re.compile(r"\((?:died|d\.)\s*\d{3,4}\)", re.IGNORECASE)
 DASH_RE = re.compile(r"\s[–-]\s")
-# "American" filter: matches american, U.S., United States, and hyphenated e.g., Chinese-American
 AMERICAN_RE = re.compile(r"\b(american|u\.s\.|united\s+states)\b", re.IGNORECASE)
+# Generic nationality prefix remover (start of string, before profession)
+NATIONALITY_RE = re.compile(r"^\s*(American|British|Canadian|Australian|Irish|German|French|Italian|Mexican|Chinese|Japanese|Russian|Spanish|Scottish|Welsh)\s+", re.IGNORECASE)
 
 def clean_text(s: str) -> str:
-    # Remove bracketed footnotes like [5] / [ 5 ]
-    s = FOOTNOTE_RE.sub("", s)
-    # Collapse whitespace
+    s = FOOTNOTE_RE.sub("", s)  # remove footnotes like [5]
     return " ".join(s.split())
 
 def split_year_and_rest(li_text: str):
@@ -38,7 +36,15 @@ def parse_name_and_details(rest: str):
     name, details = rest.split(",", 1)
     return clean_text(name.strip()), clean_text(details.strip())
 
-# --- Fetch births section via the MediaWiki API (robust against HTML changes) ---
+def normalize_details(details: str) -> str:
+    # Strip leading nationality if present
+    new_details = NATIONALITY_RE.sub("", details).strip()
+    if not new_details:
+        return ""
+    # Capitalize first word to keep it looking natural
+    new_details = new_details[0].upper() + new_details[1:]
+    return new_details
+
 def fetch_births_section_html(month: str, day: int) -> str | None:
     page = f"{month}_{day}"
     headers = {"User-Agent": USER_AGENT}
@@ -97,8 +103,7 @@ def get_living_american_birthdays(month: str, day: int):
         if not text:
             continue
 
-        # Skip entries that explicitly indicate death year
-        if DECEASED_RE.search(text):
+        if DECEASED_RE.search(text):  # skip if marked as deceased
             continue
 
         year, rest = split_year_and_rest(text)
@@ -109,13 +114,13 @@ def get_living_american_birthdays(month: str, day: int):
         if not name:
             continue
 
-        # Keep only American (or U.S./United States) entries (includes hyphenated e.g., Chinese-American)
-        # Check the full "rest" (name + details) so "American-born" etc. still passes.
+        # Only keep Americans
         american_field = f"{name} {details}"
         if not AMERICAN_RE.search(american_field):
             continue
 
         age = current_year - year
+        details = normalize_details(details)
         results.append((name, age, year, details))
 
     print(f"DEBUG: parsed {len(results)} living American birthdays")
@@ -123,7 +128,7 @@ def get_living_american_birthdays(month: str, day: int):
 
 def main():
     today = datetime.date.today()
-    month = today.strftime("%B")      # e.g., 'September'
+    month = today.strftime("%B")
     day = today.day
 
     bdays = get_living_american_birthdays(month, day)
