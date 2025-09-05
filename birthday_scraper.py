@@ -1,139 +1,133 @@
 import os
 import re
 import datetime
-import html
 import requests
 from bs4 import BeautifulSoup
 
-UA = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
-API = "https://en.wikipedia.org/w/api.php"
+USER_AGENT = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
 
-CITATION_RE = re.compile(r"\[\d+\]")                 # [12], [5], …
-DECEASED_RE = re.compile(r"\(d\.\s*\d{3,4}\)", re.I)  # (d. 1991), (D. 2008)…
-PAREN_AGE_RE = re.compile(r"\s*\([^)]*\)\s*$")        # trailing (…) often junk
+# --- Helpers ---------------------------------------------------------------
 
-def clean_text(t: str) -> str:
-    t = html.unescape(t)
-    t = CITATION_RE.sub("", t)
-    t = t.replace("  ", " ").strip()
-    return t
+DASH_RE = re.compile(r"\s[–-]\s")                 # en dash or hyphen surrounded by spaces
+FOOTNOTE_RE = re.compile(r"\s*\[\d+\]")           # remove [12] style refs
+DECEASED_RE = re.compile(r"\((?:died|d\.)\s*\d{3,4}\)", re.IGNORECASE)
 
-def fetch_births_section_html(month: str, day: int) -> str | None:
-    """Use the MediaWiki API to find the 'Births' section and return its HTML."""
-    title = f"{month}_{day}"
-    print(f"DEBUG: querying sections for {month} {day}")
+def clean_text(s: str) -> str:
+    """Normalize spaces, remove footnote refs."""
+    s = FOOTNOTE_RE.sub("", s)
+    s = " ".join(s.split())
+    return s
 
-    # 1) Find section index for 'Births'
-    r = requests.get(API, params={
-        "action": "parse",
-        "page": title,
-        "prop": "sections",
-        "format": "json"
-    }, headers={"User-Agent": UA}, timeout=30)
+def split_year_and_rest(li_text: str):
+    """
+    Wikipedia lines look like:
+      '1942 – Merald "Bubba" Knight, American singer (Gladys Knight & the Pips)'
+    Return (year:int, rest:str) or (None, None) if not parseable.
+    """
+    parts = DASH_RE.split(li_text, maxsplit=1)
+    if len(parts) != 2:
+        return None, None
+    year_str, rest = parts[0].strip(), parts[1].strip()
+    try:
+        year = int(year_str)
+    except ValueError:
+        return None, None
+    return year, rest
+
+def parse_name_and_details(rest: str):
+    """
+    Split 'Name, details …' at the FIRST comma.
+    Keep any parentheses in the details portion.
+    """
+    # Some lines have no comma (rare) -> treat whole thing as name.
+    if "," not in rest:
+        return clean_text(rest), ""
+    name, details = rest.split(",", 1)
+    return clean_text(name.strip()), clean_text(details.strip())
+
+# --- Core scraper ----------------------------------------------------------
+
+def get_living_birthdays(month: str, day: int):
+    url = f"https://en.wikipedia.org/wiki/{month}_{day}"
+    print(f"DEBUG: fetching birthdays for {month} {day} -> {url}")
+
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
     r.raise_for_status()
-    data = r.json()
+    soup = BeautifulSoup(r.content, "html.parser")
 
-    sections = data.get("parse", {}).get("sections", [])
-    idx = None
-    for s in sections:
-        if s.get("line") == "Births":
-            idx = s.get("index")
+    # Find the <h2> that contains <span id="Births">
+    births_span = soup.find("span", {"id": "Births"})
+    if not births_span:
+        print("DEBUG: couldn't find <span id='Births'>")
+        return []
+
+    births_h2 = births_span.find_parent("h2")
+    if not births_h2:
+        print("DEBUG: id='Births' not inside an <h2>; aborting")
+        return []
+
+    # Collect all <li> items from the first <ul> after this h2 up to the next h2.
+    living = []
+    current_year = datetime.date.today().year
+    li_count = 0
+
+    for sib in births_h2.find_all_next():
+        # Stop at the next top-level H2 (next big section like 'Deaths')
+        if sib.name == "h2" and sib is not births_h2:
             break
+        if sib.name == "ul":
+            for li in sib.find_all("li", recursive=False):
+                li_text = clean_text(li.get_text(" ", strip=True))
+                # Skip obviously deceased entries
+                if DECEASED_RE.search(li_text):
+                    continue
 
-    if not idx:
-        print("DEBUG: no 'Births' section index found")
-        return None
+                year, rest = split_year_and_rest(li_text)
+                if not year or not rest:
+                    continue
 
-    print(f"DEBUG: fetching section index {idx} (Births)")
-    r2 = requests.get(API, params={
-        "action": "parse",
-        "page": title,
-        "prop": "text",
-        "section": idx,
-        "format": "json"
-    }, headers={"User-Agent": UA}, timeout=30)
-    r2.raise_for_status()
-    data2 = r2.json()
-    html_text = data2.get("parse", {}).get("text", {}).get("*")
-    if not html_text:
-        print("DEBUG: section HTML missing")
-        return None
-    return html_text
+                # Parse name + details
+                name, details = parse_name_and_details(rest)
+                if not name:
+                    continue
 
-def parse_births_from_section(section_html: str, current_year: int) -> list[str]:
-    """Parse <li> items from the section HTML; keep only living people."""
-    soup = BeautifulSoup(section_html, "html.parser")
-    items = soup.find_all("li", recursive=True)
-    print(f"DEBUG: collected {len(items)} raw <li> items in section")
+                age = current_year - year
+                living.append((name, age, year, details))
+                li_count += 1
 
-    out: list[str] = []
-    for li in items:
-        raw = clean_text(li.get_text(" ", strip=True))
-        if " – " not in raw:
-            continue
+    print(f"DEBUG: collected {li_count} raw <li> items under Births")
+    print(f"DEBUG: parsed {len(living)} living birthdays")
+    return living
 
-        year_str, rest = raw.split(" – ", 1)
-        year_str = year_str.strip()
-        if not year_str.isdigit():
-            continue
-        birth_year = int(year_str)
-
-        # Skip deceased entries
-        if DECEASED_RE.search(rest) or " died " in rest.lower():
-            continue
-
-        # name + details: split at first ", "
-        if ", " in rest:
-            name, details = rest.split(", ", 1)
-        else:
-            name, details = rest, ""
-
-        name    = clean_text(name)
-        details = clean_text(details)
-
-        # Strip trailing parenthetical cruft sometimes appended to details
-        details = PAREN_AGE_RE.sub("", details).strip()
-
-        age = current_year - birth_year
-        if details:
-            formatted = f"{name} – {age} years old ({birth_year}) – {details}"
-        else:
-            formatted = f"{name} – {age} years old ({birth_year})"
-        out.append(formatted)
-
-    print(f"DEBUG: parsed {len(out)} living birthdays")
-    return out
+# --- Main: write today's file ---------------------------------------------
 
 def main():
     today = datetime.date.today()
-    month = today.strftime("%B")
+    month = today.strftime("%B")       # e.g., 'September'
     day = today.day
 
-    html_section = fetch_births_section_html(month, day)
-    birthdays: list[str] = []
-    if html_section:
-        birthdays = parse_births_from_section(html_section, today.year)
-    else:
-        print("DEBUG: falling back — no section HTML retrieved")
+    birthday_list = get_living_birthdays(month, day)
 
     out_dir = os.path.join("docs", "birthdays")
     os.makedirs(out_dir, exist_ok=True)
-    filename = f"{month.lower()}-{day}.html"
-    path = os.path.join(out_dir, filename)
 
-    with open(path, "w", encoding="utf-8") as f:
+    filename = f"{month.lower()}-{day}.html"
+    out_path = os.path.join(out_dir, filename)
+
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write("<div class='birthdays'>\n")
         f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
-        if birthdays:
-            f.write("<ul>\n")
-            for line in birthdays:
-                f.write(f"<li>{line}</li>\n")
-            f.write("</ul>\n")
-        else:
-            f.write("<p>No living birthdays found.</p>\n")
-        f.write("</div>\n")
+        f.write("<ul>\n")
+        for name, age, year, details in birthday_list:
+            # Blog-style line:
+            # Name – 83 years old (1942) – Profession/Details
+            line = f"{name} – {age} years old ({year})"
+            if details:
+                line += f" – {details}"
+            f.write(f"  <li>{line}</li>\n")
+        f.write("</ul>\n</div>\n")
 
-    print(f"DEBUG: wrote {path} ({len(birthdays)} living birthdays)")
+    print(f"DEBUG: wrote {out_path} ({len(birthday_list)} living birthdays)")
 
 if __name__ == "__main__":
     main()
