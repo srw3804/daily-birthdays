@@ -1,96 +1,85 @@
-import os
 import datetime
+import os
 import requests
 from bs4 import BeautifulSoup
 
-USER_AGENT = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
+HEADERS = {
+    "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
+}
 
-def get_birthdays(month: str, day: int):
+def get_birthdays_for_date(month: str, day: int):
     """
-    Scrape Wikipedia Selected Anniversaries page for the given month/day
-    and return a list of (birth_year, age, description) tuples.
+    Scrape births from:
+    https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{Month}_{Day}
     """
-    url = f"https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{month.capitalize()}_{day}"
-    headers = {"User-Agent": USER_AGENT}
-    r = requests.get(url, headers=headers, timeout=30)
+    url = f"https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{month}_{day}"
+    r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    soup = BeautifulSoup(r.content, "html.parser")
-
-    # Find "Births" section
-    births_section = soup.find("span", {"id": "Births"})
-    if not births_section:
+    anchor = soup.select_one("span#Births")
+    if not anchor:
         return []
 
-    ul = births_section.find_next("ul")
-    if not ul:
+    # go up to the heading containing the anchor (usually <h2> or <h3>)
+    heading = anchor.parent
+    while heading and heading.name not in ("h2", "h3"):
+        heading = heading.parent
+
+    if not heading:
         return []
 
     birthdays = []
-    for li in ul.find_all("li", recursive=False):
-        text = li.get_text(" ", strip=True)
-
-        # Split on en-dash first, fallback to hyphen
-        parts = text.split("–", 1)
-        if len(parts) == 1:
-            parts = text.split("-", 1)
-        if len(parts) != 2:
-            continue
-
-        year_str, description = parts
-        try:
-            birth_year = int(year_str.strip())
-        except ValueError:
-            continue
-
-        age = datetime.datetime.now().year - birth_year
-        birthdays.append((birth_year, age, description.strip()))
+    # iterate forward until the next section heading
+    for sib in heading.next_siblings:
+        # stop when we hit another section heading
+        if getattr(sib, "name", None) in ("h2", "h3"):
+            break
+        # collect list items directly under ULs in this section
+        if getattr(sib, "name", None) == "ul":
+            for li in sib.find_all("li", recursive=False):
+                text = " ".join(li.get_text(" ", strip=True).split())
+                # split on en dash or em dash
+                parts = (text.split(" – ", 1) if " – " in text else text.split(" — ", 1))
+                if len(parts) == 2:
+                    year_str, description = parts[0].strip(), parts[1].strip()
+                    if year_str.isdigit():
+                        year = int(year_str)
+                        age = datetime.date.today().year - year
+                        birthdays.append((year, age, description))
 
     return birthdays
 
+# ---------- main: write to docs/birthdays/{month}-{day}.html ----------
 
-# ---------- DATE SELECTION ----------
-# For testing a specific page (Sept 4):
-month = "september"
-day = 4
-today = datetime.date(2023, 9, 4)
+today = datetime.date.today()
 
-# For daily automatic use, comment the 3 lines above and uncomment:
-# today = datetime.date.today()
-# month = today.strftime("%B").lower()
-# day = today.day
-# -----------------------------------
+# For “september-4.html”-style filenames:
+month_slug = today.strftime("%B").lower()
+day_num = today.day
 
-# Scrape
-birthday_list = get_birthdays(month, day)
+# For URL/page (Wikipedia expects Month capitalized, day without leading zero)
+wiki_month = today.strftime("%B")
+wiki_day = day_num
 
-# Ensure output folder
-output_folder = os.path.join("docs", "birthdays")
+birthday_list = get_birthdays_for_date(wiki_month, wiki_day)
+
+output_folder = "docs/birthdays"
 os.makedirs(output_folder, exist_ok=True)
 
-# File name like 'september-4.html'
-filename = f"{month}-{day}.html"
+filename = f"{month_slug}-{day_num}.html"
 file_path = os.path.join(output_folder, filename)
 
-# Build HTML (always write a file so the workflow can commit something)
-if not birthday_list:
-    inner = "<p>No birthdays found.</p>"
-else:
-    items = "\n".join(
-        f"<li>{desc} – {age} years old ({by})</li>"
-        for (by, age, desc) in birthday_list
-    )
-    inner = f"<ul>\n{items}\n</ul>"
-
-html = (
-    "<div class='birthdays'>\n"
-    f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n"
-    f"{inner}\n"
-    "</div>\n"
-)
-
 with open(file_path, "w", encoding="utf-8") as f:
-    f.write(html)
+    f.write("<div class='birthdays'>\n")
+    f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
+    if birthday_list:
+        f.write("<ul>\n")
+        for birth_year, age, desc in birthday_list:
+            f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
+        f.write("</ul>\n")
+    else:
+        f.write("<p>No birthdays found.</p>\n")
+    f.write("</div>\n")
 
-print(f"Writing file to: {file_path}")
-print(f"Found {len(birthday_list)} birthdays.")
+print(f"Wrote {len(birthday_list)} birthdays to {file_path}")
