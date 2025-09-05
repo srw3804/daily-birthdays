@@ -21,73 +21,80 @@ def get_birthdays(month: str, day: int):
     }
     r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
-
     soup = BeautifulSoup(r.content, "html.parser")
 
-    # The date pages use: <h2><span class="mw-headline" id="Births">Births</span></h2>
-    births_span = soup.find("span", {"id": "Births", "class": "mw-headline"})
-    if not births_span:
-        print("DEBUG: couldn't find <span class='mw-headline' id='Births'>")
+    # Be flexible: find *any* tag with id="Births"
+    births_anchor = soup.find(id="Births")
+    if not births_anchor:
+        print("DEBUG: couldn't find element with id='Births'")
+        return []
+
+    # Section header is typically an <h2> that contains that span
+    header = births_anchor.find_parent("h2")
+    if not header:
+        print("DEBUG: id='Births' not inside an <h2>; aborting")
         return []
 
     birthdays = []
-    ul_count = 0
+    ul_seen = 0
     kept = 0
 
-    # Start from the <h2> that contains this span and walk forward until next <h2>
-    current = births_span.parent  # <h2>
-    for tag in current.find_all_next():
-        if tag.name == "h2":
+    # Walk siblings until the next h2
+    for sib in header.next_siblings:
+        # Only element nodes have .name
+        name = getattr(sib, "name", None)
+        if not name:
+            continue
+        if name == "h2":
             break
-
-        if tag.name == "ul":
-            ul_count += 1
-            # Only take top-level <li> in this UL (nested ULs will be processed when reached)
-            for li in tag.find_all("li", recursive=False):
+        if name == "ul":
+            ul_seen += 1
+            # Only top-level LIs in this UL
+            for li in sib.find_all("li", recursive=False):
                 text = li.get_text(" ", strip=True)
-
-                # Expected form: "1877 – Name, occupation (d. 1939)"
-                m = re.match(r"^(\d{3,4})\s*[–-]\s*(.+)$", text)
-                if not m:
+                # Typical bullet: "1877 – Name, occupation (d. 1939)"
+                # Split on hyphen/en-dash once
+                parts = re.split(r"\s[–-]\s", text, maxsplit=1)
+                if len(parts) != 2:
                     continue
 
-                year_str, desc = m.group(1), m.group(2).strip()
+                year_str, desc = parts[0].strip(), parts[1].strip()
 
-                # Skip junky bullets that don’t contain any letters
+                # Filter out era bullets like "1601–1900 (2)" or "pre-1600"
                 if not re.search(r"[A-Za-z]", desc):
                     continue
-
-                try:
-                    birth_year = int(year_str)
-                except ValueError:
+                if "," not in desc:  # real entries almost always have a comma after the name
+                    continue
+                if re.fullmatch(r"(?i)pre[-\s]?1600.*|.*\d{3,4}\s*[-–]\s*\d{3,4}.*|.*present.*", year_str):
                     continue
 
+                # Parse year; skip weird tokens like "AD 19" or "c. 1200" unless we can get a pure year
+                m_year = re.search(r"\b(\d{3,4})\b", year_str)
+                if not m_year:
+                    continue
+                birth_year = int(m_year.group(1))
                 age = datetime.datetime.now().year - birth_year
+
                 birthdays.append((birth_year, age, desc))
                 kept += 1
 
-    print(f"DEBUG: scanned {ul_count} UL blocks; kept {kept} li items; parsed {len(birthdays)} birthdays")
+    print(f"DEBUG: scanned {ul_seen} UL blocks; kept {kept} li items; parsed {len(birthdays)} birthdays")
     return birthdays
 
 
 def main():
-    # Allow overrides for testing via environment variables
-    # e.g. MONTH_OVERRIDE=September DAY_OVERRIDE=4
+    # Allow overrides for testing
     today = datetime.date.today()
     month = os.getenv("MONTH_OVERRIDE") or today.strftime("%B")
     day = int(os.getenv("DAY_OVERRIDE") or today.day)
 
     birthdays = get_birthdays(month, day)
 
-    # Output folder for GitHub Pages
     output_dir = Path("docs/birthdays")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # File name like 'september-5.html'
-    month_slug = month.lower()
-    file_path = output_dir / f"{month_slug}-{day}.html"
+    file_path = output_dir / f"{month.lower()}-{day}.html"
 
-    # Write HTML
     with file_path.open("w", encoding="utf-8") as f:
         f.write("<div class='birthdays'>\n")
         f.write(f"<h3>🎉 Celebrity Birthdays – {month} {day:02d}</h3>\n")
@@ -101,7 +108,6 @@ def main():
         for birth_year, age, desc in birthdays:
             f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
         f.write("</ul>\n</div>")
-
     print(f"DEBUG: wrote {file_path} ({len(birthdays)} birthdays)")
 
 
