@@ -2,90 +2,109 @@ import os
 import re
 import datetime
 import requests
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup
 
+API = "https://en.wikipedia.org/w/api.php"
 HEADERS = {
     "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
 }
 
-DASH_RE = re.compile(r'^\s*(\d{1,4})\s*[–—-]\s*(.*)$')  # year + (en/em/hyphen) + rest
+DASH_RE = re.compile(r'^\s*(\d{1,4})\s*[–—-]\s*(.*)$')  # year – desc
 
-def get_births_from_date_page(month_cap: str, day: int):
-    """Scrape Births from https://en.wikipedia.org/wiki/{Month}_{day}"""
-    url = f"https://en.wikipedia.org/wiki/{month_cap}_{day}"
-    r = requests.get(url, headers=HEADERS, timeout=30)
+def fetch_births_section_html(month_cap: str, day: int) -> str | None:
+    """
+    Use the MediaWiki API to (1) find the section index whose line == 'Births'
+    on the {Month}_{day} page, then (2) fetch that section's HTML.
+    Returns HTML string for the 'Births' section or None.
+    """
+    page = f"{month_cap}_{day}"
+
+    # 1) Find sections to locate the 'Births' section index
+    params_sections = {
+        "action": "parse",
+        "page": page,
+        "prop": "sections",
+        "format": "json",
+        "formatversion": "2",
+    }
+    r = requests.get(API, params=params_sections, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+    data = r.json()
+    sections = data.get("parse", {}).get("sections", [])
+    births_index = None
+    for s in sections:
+        if s.get("line", "").strip().lower() == "births":
+            births_index = s.get("index")
+            break
+    if births_index is None:
+        return None
 
-    # Find the Births heading: usually <span class="mw-headline" id="Births">Births</span>
-    anchor = soup.select_one('#Births')
-    if anchor:
-        # climb to its heading element (h2 or h3)
-        h = anchor
-        while h and isinstance(h, Tag) and h.name not in ("h2", "h3"):
-            h = h.parent
-        births_heading = h if h and h.name in ("h2", "h3") else None
-    else:
-        births_heading = None
-        for h in soup.find_all(["h2", "h3"]):
-            if "births" in h.get_text(" ", strip=True).lower():
-                births_heading = h
-                break
+    # 2) Fetch the HTML for that section only
+    params_section_html = {
+        "action": "parse",
+        "page": page,
+        "section": births_index,
+        "prop": "text",
+        "format": "json",
+        "formatversion": "2",
+    }
+    r2 = requests.get(API, params=params_section_html, headers=HEADERS, timeout=30)
+    r2.raise_for_status()
+    data2 = r2.json()
+    html = data2.get("parse", {}).get("text", "")
+    return html or None
 
-    if not births_heading:
-        return []
-
-    # Iterate siblings until the next h2/h3, collecting all <ul> children
-    results = []
-    node = births_heading.next_sibling
+def parse_births_from_html(html: str) -> list[tuple[int, int, str]]:
+    """
+    Parse the HTML of the Births section and return a list of tuples:
+    (birth_year, age, description).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("ul > li")
+    out = []
     current_year = datetime.date.today().year
 
-    while node:
-        if isinstance(node, NavigableString):
-            node = node.next_sibling
+    for li in items:
+        text = " ".join(li.get_text(" ", strip=True).split())
+        m = DASH_RE.match(text)
+        if not m:
             continue
-        if isinstance(node, Tag) and node.name in ("h2", "h3"):
-            break  # end of Births section
-        if isinstance(node, Tag) and node.name == "ul":
-            for li in node.find_all("li", recursive=False):
-                text = " ".join(li.get_text(" ", strip=True).split())
-                m = DASH_RE.match(text)
-                if not m:
-                    continue
-                year_str, desc = m.groups()
-                try:
-                    year = int(year_str)
-                except ValueError:
-                    continue
-                if 0 < year <= current_year:
-                    age = current_year - year
-                    results.append((year, age, desc))
-        node = node.next_sibling
+        year_str, desc = m.groups()
+        try:
+            year = int(year_str)
+        except ValueError:
+            continue
+        if 0 < year <= current_year:
+            age = current_year - year
+            out.append((year, age, desc))
+    return out
 
-    return results
+def main():
+    today = datetime.date.today()
+    month_cap = today.strftime("%B")       # e.g., "September" (for the wiki page)
+    month_slug = month_cap.lower()         # e.g., "september" (for filename)
+    day_num = today.day
 
-# ---------------- main: write file ----------------
-today = datetime.date.today()
-month_cap = today.strftime("%B")      # e.g., "September" for URL
-month_slug = month_cap.lower()        # e.g., "september" for filename
-day_num = today.day
+    html = fetch_births_section_html(month_cap, day_num)
+    birthdays = parse_births_from_html(html) if html else []
 
-birthdays = get_births_from_date_page(month_cap, day_num)
+    out_dir = "docs/birthdays"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{month_slug}-{day_num}.html")
 
-out_dir = "docs/birthdays"
-os.makedirs(out_dir, exist_ok=True)
-out_path = os.path.join(out_dir, f"{month_slug}-{day_num}.html")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("<div class='birthdays'>\n")
+        f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
+        if birthdays:
+            f.write("<ul>\n")
+            for year, age, desc in birthdays:
+                f.write(f"<li>{desc} – {age} years old ({year})</li>\n")
+            f.write("</ul>\n")
+        else:
+            f.write("<p>No birthdays found.</p>\n")
+        f.write("</div>\n")
 
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write("<div class='birthdays'>\n")
-    f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
-    if birthdays:
-        f.write("<ul>\n")
-        for year, age, desc in birthdays:
-            f.write(f"<li>{desc} – {age} years old ({year})</li>\n")
-        f.write("</ul>\n")
-    else:
-        f.write("<p>No birthdays found.</p>\n")
-    f.write("</div>\n")
+    print(f"Wrote {len(birthdays)} items to {out_path}")
 
-print(f"Wrote {len(birthdays)} items to {out_path}")
+if __name__ == "__main__":
+    main()
