@@ -1,128 +1,79 @@
-import os
-import re
 import datetime
-from pathlib import Path
-
 import requests
 from bs4 import BeautifulSoup
-
-API = "https://en.wikipedia.org/w/api.php"
-HEADERS = {
-    "User-Agent": "daily-birthdays-script/1.0 (+https://github.com/srw3804/daily-birthdays; contact: srw3804)",
-    "Accept-Language": "en",
-}
-
-def get_sections(month: str, day: int):
-    page = f"{month}_{day}"
-    params = {
-        "action": "parse",
-        "page": page,
-        "prop": "sections",
-        "format": "json",
-        "formatversion": "2",
-    }
-    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json().get("parse", {}).get("sections", []) or []
-
-def get_section_html(month: str, day: int, section_index: int) -> str:
-    page = f"{month}_{day}"
-    params = {
-        "action": "parse",
-        "page": page,
-        "prop": "text",
-        "section": str(section_index),
-        "format": "json",
-        "formatversion": "2",
-    }
-    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json().get("parse", {}).get("text", "")
-
-# marks (d. 2009), (died 2010), “died …”, or dagger †
-_DEATH_PAT = re.compile(r"(?:\((?:d\.|died)\s*\d{3,4}\)|\b(?:died|death)\b|\u2020)", re.IGNORECASE)
-
-def looks_deceased(text: str) -> bool:
-    return bool(_DEATH_PAT.search(text))
-
-def clean_text(s: str) -> str:
-    s = re.sub(r"\[\d+\]", "", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+import os
 
 def get_birthdays(month: str, day: int):
-    print(f"DEBUG: querying sections for {month} {day}")
-    sections = get_sections(month, day)
+    url = f"https://en.wikipedia.org/wiki/{month}_{day}"
+    headers = {
+        'User-Agent': 'daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)'
+    }
+    print(f"DEBUG: fetching {url}")
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.content, 'html.parser')
 
-    births_index = None
-    for sec in sections:
-        if (sec.get("line") or "").strip().lower() == "births":
-            births_index = sec.get("index")
-            break
-
-    if births_index is None:
-        print("DEBUG: couldn't find a 'Births' section in sections list")
+    # Find the <h2> with id="Births"
+    births_header = soup.find('h2', {'id': 'Births'})
+    if not births_header:
+        print("DEBUG: couldn't find <h2 id='Births'>")
         return []
 
-    print(f"DEBUG: fetching section index {births_index} (Births)")
-    html = get_section_html(month, day, births_index)
-    soup = BeautifulSoup(html, "html.parser")
+    # The next <ul> after the <h2> contains the birthdays
+    ul = births_header.find_next('ul')
+    if not ul:
+        print("DEBUG: no <ul> found after Births header")
+        return []
 
-    current_year = datetime.date.today().year
-    max_age = 125
-    results = []
+    items = ul.find_all('li')
+    print(f"DEBUG: found {len(items)} raw items under Births")
 
-    # ✅ Look at ALL list items that are direct children of ANY <ul> inside the section
-    for li in soup.select("ul > li"):
-        text = clean_text(li.get_text(" ", strip=True))
+    birthdays = []
+    current_year = datetime.datetime.now().year
+    for item in items:
+        text = item.get_text(" ", strip=True)
+        parts = text.split(" – ", 1)
+        if len(parts) == 2:
+            year_str, description = parts
+            try:
+                birth_year = int(year_str.strip())
+                age = current_year - birth_year
+                # Only keep if still alive
+                if "died" not in description.lower():
+                    birthdays.append((birth_year, age, description.strip()))
+            except ValueError:
+                continue
 
-        # split the leading year from the rest: "1965 – Name, profession"
-        parts = re.split(r"\s*[–-]\s*", text, maxsplit=1)
-        if len(parts) != 2:
-            continue
-        year_str, desc = parts[0], parts[1]
+    print(f"DEBUG: parsed {len(birthdays)} living birthdays")
+    return birthdays
 
-        m = re.fullmatch(r"\d{3,4}", year_str.strip())
-        if not m:
-            continue
 
-        year = int(m.group(0))
-        age = current_year - year
-        if age < 0 or age > max_age:
-            continue
+# Prepare today's date
+today = datetime.date.today()
+month = today.strftime("%B")
+day = today.day
 
-        if looks_deceased(desc):
-            continue
+# Get birthday data
+birthday_list = get_birthdays(month, day)
 
-        results.append((year, age, desc))
+# Create output folder if missing
+output_folder = "docs/birthdays"
+os.makedirs(output_folder, exist_ok=True)
 
-    print(f"DEBUG: collected {len(results)} living birthdays")
-    return results
+# Construct file name like 'september-5.html'
+filename = f"{month.lower()}-{day}.html"
+file_path = os.path.join(output_folder, filename)
 
-def main():
-    today = datetime.date.today()
-    month = (os.getenv("MONTH_OVERRIDE") or today.strftime("%B")).strip()
-    day = int(os.getenv("DAY_OVERRIDE") or today.day)
+# Write to HTML file
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write("<div class='birthdays'>\n")
+    f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
+    if birthday_list:
+        f.write("<ul>\n")
+        for birth_year, age, desc in birthday_list:
+            f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
+        f.write("</ul>\n")
+    else:
+        f.write("<p>No living birthdays found.</p>\n")
+    f.write("</div>")
 
-    living = get_birthdays(month, day)
-
-    out_dir = Path("docs/birthdays")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{month.lower()}-{day}.html"
-
-    with out_file.open("w", encoding="utf-8") as f:
-        f.write("<div class='birthdays'>\n")
-        f.write(f"<h3>🎉 Celebrity Birthdays – {month} {day:02d}</h3>\n")
-        if living:
-            f.write("<ul>\n")
-            for year, age, desc in living:
-                f.write(f"<li>{desc} – {age} years old ({year})</li>\n")
-            f.write("</ul>\n")
-        else:
-            f.write("<p>No birthdays found.</p>\n")
-        f.write("</div>\n")
-
-    print(f"DEBUG: wrote {out_file} ({len(living)} living birthdays)")
-
-if __name__ == "__main__":
-    main()
+print(f"DEBUG: wrote {file_path} ({len(birthday_list)} living birthdays)")
