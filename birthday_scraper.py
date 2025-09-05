@@ -2,110 +2,159 @@ import os
 import re
 import datetime
 from pathlib import Path
+from typing import List, Tuple
 
 import requests
-from bs4 import BeautifulSoup
 
+API = "https://en.wikipedia.org/w/api.php"
+HEADERS = {
+    "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)",
+    "Accept-Language": "en",
+}
 
-USER_AGENT = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
-TZ = "America/Detroit"  # your local time for dating files
+# Bullet lines look like: "* 1969 – Name, occupation (d. 2015)"
+BULLET_RE = re.compile(r"^\*\s*(\d{3,4})\s*[–—-]\s*(.+)$")
 
+def get_sections(month: str, day: int):
+    """Return the sections array for the page Month_Day via the API."""
+    page = f"{month}_{day}"
+    params = {
+        "action": "parse",
+        "page": page,
+        "prop": "sections",
+        "format": "json",
+        "formatversion": "2",
+    }
+    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    sections = data.get("parse", {}).get("sections", []) or []
+    return sections
+
+def find_births_range(sections) -> List[int]:
+    """
+    Find the 'Births' section index and all subsequent subsection indices
+    until the next top-level (toclevel 2) section.
+    Returns a list of section indices (as strings) to fetch.
+    """
+    # Find the top-level Births section (usually toclevel == 2 and line == 'Births')
+    births_idx = None
+    births_level = None
+
+    for s in sections:
+        line = (s.get("line") or "").strip().lower()
+        if line == "births":
+            births_idx = s.get("index")
+            births_level = s.get("toclevel", 2)
+            break
+
+    if not births_idx:
+        return []
+
+    # Collect this section and everything that follows with a deeper level,
+    # stopping when we hit the next section of the same or higher level.
+    indices = [births_idx]
+    start_found = False
+    for s in sections:
+        if s.get("index") == births_idx:
+            start_found = True
+            continue
+        if not start_found:
+            continue
+
+        lvl = s.get("toclevel", 2)
+        if lvl <= births_level:
+            # we've reached the next top-level section (e.g., 'Deaths')
+            break
+        indices.append(s.get("index"))
+
+    return indices
+
+def fetch_wikitext(page: str, section_index: str) -> str:
+    """Fetch the wikitext for a single section index."""
+    params = {
+        "action": "parse",
+        "page": page,
+        "section": section_index,
+        "prop": "wikitext",
+        "format": "json",
+        "formatversion": "2",
+    }
+    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return r.json().get("parse", {}).get("wikitext", "") or ""
+
+def parse_births_from_wikitext(wikitext: str) -> List[Tuple[int, int, str]]:
+    """Extract (year, age, description) from wikitext bullet lines."""
+    out: List[Tuple[int, int, str]] = []
+    current_year = datetime.date.today().year
+
+    for raw in wikitext.splitlines():
+        m = BULLET_RE.match(raw.strip())
+        if not m:
+            continue
+        year_str, desc = m.groups()
+        try:
+            year = int(year_str)
+        except ValueError:
+            continue
+        # Skip obvious junk
+        if not (1 <= year <= current_year):
+            continue
+        # Must have letters in the description (filters numbers-only bullets)
+        if not re.search(r"[A-Za-z]", desc):
+            continue
+        age = current_year - year
+        out.append((year, age, desc.strip()))
+    return out
 
 def get_birthdays(month: str, day: int):
-    """
-    Scrape https://en.wikipedia.org/wiki/{Month}_{Day}
-    Collect all top-level <li> items under the Births section (until next <h2>).
-    Return [(birth_year:int, age:int, description:str), ...]
-    """
-    url = f"https://en.wikipedia.org/wiki/{month}_{day}"
-    print(f"DEBUG: fetching {url}")
+    """Main: resolve sections via API, fetch wikitext for Births range, parse."""
+    page = f"{month}_{day}"
+    sections = get_sections(month, day)
+    print(f"DEBUG: sections returned: {len(sections)}")
 
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.content, "html.parser")
-
-    # Find the Births section header: <h2><span id="Births" class="mw-headline">Births</span></h2>
-    span = soup.find("span", id="Births")
-    if not span:
-        print("DEBUG: couldn't find <span id='Births'>")
+    indices = find_births_range(sections)
+    print(f"DEBUG: births section indices: {indices}")
+    if not indices:
         return []
 
-    h2 = span.find_parent("h2")
-    if not h2:
-        print("DEBUG: couldn't find parent <h2> for Births span")
-        return []
+    items: List[Tuple[int, int, str]] = []
+    for idx in indices:
+        wt = fetch_wikitext(page, idx)
+        parsed = parse_births_from_wikitext(wt)
+        print(f"DEBUG: section {idx}: parsed {len(parsed)} items")
+        items.extend(parsed)
 
-    birthdays = []
-    ul_seen = 0
-    li_seen = 0
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for year, age, desc in items:
+        key = (year, desc)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((year, age, desc))
 
-    # Walk sibling elements after this <h2> until the next <h2>
-    for sib in h2.find_next_siblings():
-        if getattr(sib, "name", None) == "h2":
-            break
-        if getattr(sib, "name", None) == "ul":
-            ul_seen += 1
-            # Only direct li children (avoid double-counting nested li)
-            for li in sib.find_all("li", recursive=False):
-                text = li.get_text(" ", strip=True)
-
-                # Split once on en-dash/em-dash/hyphen surrounded by spaces
-                parts = re.split(r"\s[–—-]\s", text, maxsplit=1)
-                if len(parts) != 2:
-                    continue
-
-                year_str, desc = parts[0].strip(), parts[1].strip()
-
-                # Filter out buckets like "1601–1900 (2)", "pre-1600", or lines without letters
-                if not re.search(r"[A-Za-z]", desc):
-                    continue
-                if re.search(r"\bpre[-\s]?1600\b", year_str, flags=re.I):
-                    continue
-                if re.search(r"\b\d{3,4}\s*[–—-]\s*\d{3,4}\b", year_str):
-                    continue
-                if re.search(r"\bpresent\b", year_str, flags=re.I):
-                    continue
-
-                # Extract a clean year from the left part (handles "AD 19", "c. 1200", etc.)
-                m_year = re.search(r"\b(\d{3,4})\b", year_str)
-                if not m_year:
-                    continue
-
-                birth_year = int(m_year.group(1))
-                current_year = datetime.datetime.now().year
-                if not (1 <= birth_year <= current_year):
-                    continue
-
-                age = current_year - birth_year
-                birthdays.append((birth_year, age, desc))
-                li_seen += 1
-
-    print(f"DEBUG: scanned {ul_seen} UL blocks; kept {li_seen} li items; parsed {len(birthdays)} birthdays")
-    return birthdays
-
+    print(f"DEBUG: total parsed after dedupe: {len(deduped)}")
+    return deduped
 
 def main():
-    # Use your local date so filenames match your day
-    # (Avoids UTC day-shift on GitHub runners)
+    # Local date (America/Detroit) to match your posting day
     try:
         from zoneinfo import ZoneInfo
-        today = datetime.datetime.now(ZoneInfo(TZ)).date()
+        today = datetime.datetime.now(ZoneInfo("America/Detroit")).date()
     except Exception:
-        today = datetime.date.today()  # fallback if zoneinfo unavailable
+        today = datetime.date.today()
 
-    # Allow override via env for manual backfill (optional)
-    month = os.getenv("MONTH_OVERRIDE") or today.strftime("%B")   # e.g., "September"
+    month = os.getenv("MONTH_OVERRIDE") or today.strftime("%B")  # e.g., "September"
     day = int(os.getenv("DAY_OVERRIDE") or today.day)
 
     items = get_birthdays(month, day)
 
-    # Output to GitHub Pages
     out_dir = Path("docs/birthdays")
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{month.lower()}-{day}.html"   # e.g., "september-5.html"
-    out_path = out_dir / filename
+    out_path = out_dir / f"{month.lower()}-{day}.html"
 
     with out_path.open("w", encoding="utf-8") as f:
         f.write("<div class='birthdays'>\n")
@@ -120,7 +169,6 @@ def main():
         f.write("</div>\n")
 
     print(f"DEBUG: wrote {out_path} ({len(items)} birthdays)")
-
 
 if __name__ == "__main__":
     main()
