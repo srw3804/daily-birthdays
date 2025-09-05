@@ -12,10 +12,7 @@ HEADERS = {
     "Accept-Language": "en",
 }
 
-# --------- Utilities ---------
-
 def get_sections(month: str, day: int):
-    """Return the list of sections for the date page via Wikipedia API."""
     page = f"{month}_{day}"
     params = {
         "action": "parse",
@@ -28,9 +25,7 @@ def get_sections(month: str, day: int):
     r.raise_for_status()
     return r.json().get("parse", {}).get("sections", []) or []
 
-
 def get_section_html(month: str, day: int, section_index: int) -> str:
-    """Return HTML for a specific section index on the date page."""
     page = f"{month}_{day}"
     params = {
         "action": "parse",
@@ -44,30 +39,23 @@ def get_section_html(month: str, day: int, section_index: int) -> str:
     r.raise_for_status()
     return r.json().get("parse", {}).get("text", "")
 
-
-_DEATH_PAT = re.compile(
-    r"(?:\((?:d\.|died)\s*\d{3,4}\)|\b(?:died|death)\b|\u2020)",  # (d. 2009) (died 2009) died / †
-    flags=re.IGNORECASE,
-)
+# marks (d. 2009), (died 2010), “died …”, or dagger †
+_DEATH_PAT = re.compile(r"(?:\((?:d\.|died)\s*\d{3,4}\)|\b(?:died|death)\b|\u2020)", re.IGNORECASE)
 
 def looks_deceased(text: str) -> bool:
     return bool(_DEATH_PAT.search(text))
 
 def clean_text(s: str) -> str:
-    s = re.sub(r"\[\d+\]", "", s)           # strip reference markers [12]
+    s = re.sub(r"\[\d+\]", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# --------- Core ---------
-
 def get_birthdays(month: str, day: int):
-    """Return list[(year, age, description)] for living people in the Births section."""
     print(f"DEBUG: querying sections for {month} {day}")
     sections = get_sections(month, day)
 
     births_index = None
     for sec in sections:
-        # 'line' is the section title (e.g., "Births", "Deaths", etc.)
         if (sec.get("line") or "").strip().lower() == "births":
             births_index = sec.get("index")
             break
@@ -84,35 +72,32 @@ def get_birthdays(month: str, day: int):
     max_age = 125
     results = []
 
-    # The section HTML usually starts right at the first <ul> of births ranges.
-    # Only walk top-level <ul> and their immediate <li> children.
-    for ul in soup.find_all("ul", recursive=False):
-        for li in ul.find_all("li", recursive=False):
-            text = clean_text(li.get_text(" ", strip=True))
-            # Split on first dash between year and description
-            parts = re.split(r"\s*[–-]\s*", text, maxsplit=1)
-            if len(parts) != 2:
-                continue
-            year_str, desc = parts[0], parts[1]
+    # ✅ Look at ALL list items that are direct children of ANY <ul> inside the section
+    for li in soup.select("ul > li"):
+        text = clean_text(li.get_text(" ", strip=True))
 
-            ymatch = re.fullmatch(r"\d{3,4}", year_str.strip())
-            if not ymatch:
-                # skip ranges or non-year headings inside the section
-                continue
+        # split the leading year from the rest: "1965 – Name, profession"
+        parts = re.split(r"\s*[–-]\s*", text, maxsplit=1)
+        if len(parts) != 2:
+            continue
+        year_str, desc = parts[0], parts[1]
 
-            year = int(ymatch.group(0))
-            age = current_year - year
-            if age < 0 or age > max_age:
-                continue
+        m = re.fullmatch(r"\d{3,4}", year_str.strip())
+        if not m:
+            continue
 
-            if looks_deceased(desc):
-                continue
+        year = int(m.group(0))
+        age = current_year - year
+        if age < 0 or age > max_age:
+            continue
 
-            results.append((year, age, desc))
+        if looks_deceased(desc):
+            continue
+
+        results.append((year, age, desc))
 
     print(f"DEBUG: collected {len(results)} living birthdays")
     return results
-
 
 def main():
     today = datetime.date.today()
@@ -138,7 +123,6 @@ def main():
         f.write("</div>\n")
 
     print(f"DEBUG: wrote {out_file} ({len(living)} living birthdays)")
-
 
 if __name__ == "__main__":
     main()
