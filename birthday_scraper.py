@@ -1,44 +1,60 @@
 # birthday_scraper.py
+
 import os
 import re
 import datetime
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
-USER_AGENT = "daily-birthdays-script/1.0 (+https://github.com/srw3804/daily-birthdays)"
+# ---------- Config ----------
+USER_AGENT = "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
+OUTPUT_DIR = "docs/birthdays"  # GitHub Pages: /docs is the published root
+# ---------------------------
 
-DASH_RE = re.compile(r"\s*[–—-]\s*", re.UNICODE)
-REF_RE = re.compile(r"\[\d+\]")  # strip [1], [12], etc.
+# Regex to strip citation footnotes like [1], [2], [a], etc.
+REF_RE = re.compile(r"\[\s*[0-9a-zA-Z]+\s*\]")
+# Common dash characters used on Wikipedia between year and description
+DASH_RE = re.compile(r"\s*[–—-]\s*")  # en/em/hyphen
+
+def month_title(month_name: str) -> str:
+    """Return the Wikipedia page month title form ('September')."""
+    # Wikipedia expects capitalized English month names
+    return month_name.capitalize()
 
 def find_births_header(soup: BeautifulSoup):
-    """Return the <h2>/<h3> element that starts the Births section, or None."""
-    # 1) Most common: <h2><span id="Births" class="mw-headline">Births</span></h2>
-    anchor = soup.select_one("span#Births")
+    """
+    Locate the 'Births' section header on a {Month}_{Day} page.
+    Works for:
+    - <span id="Births">
+    - <h2><span class="mw-headline" id="Births">Births</span></h2>
+    - Headings that contain the word 'Births'
+    """
+    # Direct anchor <span id="Births">
+    anchor = soup.find("span", id="Births")
     if anchor:
-        h = anchor.find_parent(["h2", "h3"])
-        if h: 
-            return h
+        return anchor
 
-    # 2) Fallback: any mw-headline whose text is exactly "Births"
-    for span in soup.select("span.mw-headline"):
-        if span.get_text(strip=True).lower() == "births":
-            h = span.find_parent(["h2", "h3"])
-            if h:
-                return h
+    # Headline with id="Births"
+    headline = soup.find("span", {"class": "mw-headline", "id": "Births"})
+    if headline:
+        return headline
 
-    # 3) Ultra fallback: any header h2/h3 whose text (direct or via headline) is "Births"
-    for h in soup.find_all(["h2", "h3"]):
-        text = h.get_text(" ", strip=True).lower()
-        if text == "births":
-            return h
+    # Fallback: any heading that contains text 'Births'
+    for tag in soup.find_all(["h2", "h3", "span"]):
+        txt = (tag.get_text(strip=True) or "").lower()
+        if "births" in txt:
+            return tag
+
     return None
 
 def fetch_births(month_name: str, day: int):
-    url = f"https://en.wikipedia.org/wiki/{month_name}_{day}"
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en",
-    }
+    """
+    Fetch and parse the 'Births' list from the Wikipedia page /{Month}_{day}.
+    Returns list of tuples: (birth_year, age, description)
+    """
+    url = f"https://en.wikipedia.org/wiki/{month_title(month_name)}_{day}"
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en"}
+
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, "html.parser")
@@ -48,30 +64,34 @@ def fetch_births(month_name: str, day: int):
         print("DEBUG: Births header not found with any strategy.")
         return []
 
-    # Collect <li> elements until the next h2/h3
-    lis = []
-    for sib in header.next_siblings:
-        if isinstance(sib, Tag):
-            if sib.name in ("h2", "h3"):
-                break
-            lis.extend(sib.find_all("li"))
-    print(f"DEBUG: collected {len(lis)} li items under Births")
+    # Be tolerant: find the **first <ul> anywhere after** the header/anchor.
+    ul = header.find_next("ul")
+    if not ul:
+        print("DEBUG: No <ul> found after Births header")
+        return []
+
+    items = ul.find_all("li")
+    print(f"DEBUG: collected {len(items)} li items under Births")
 
     current_year = datetime.datetime.utcnow().year
     birthdays = []
 
-    for li in lis:
+    for li in items:
+        # Collapse references and trim whitespace
         text = REF_RE.sub("", li.get_text(" ", strip=True))
+
+        # Split on the first dash-like delimiter into "year" + "description"
         parts = DASH_RE.split(text, maxsplit=1)
         if len(parts) != 2:
             continue
 
         year_raw, description = parts[0].strip(), parts[1].strip()
 
-        # Extract a leading year (tolerate prefixes like 'c.' or 'AD')
+        # Extract the first 1-4 digit year (many entries are like "1949 – ...")
         m = re.match(r"^\D*(\d{1,4})\b", year_raw)
         if not m:
             continue
+
         birth_year = int(m.group(1))
         if not (1 <= birth_year <= current_year):
             continue
@@ -83,30 +103,46 @@ def fetch_births(month_name: str, day: int):
     return birthdays
 
 def main():
-    # Use UTC date so the daily run is stable in Actions
-    today = datetime.datetime.utcnow().date()
-    month_name = today.strftime("%B")       # e.g., "September"
-    month_slug = month_name.lower()         # e.g., "september"
-    day = today.day
+    # Allow manual override via environment (handy for testing specific dates)
+    env_month = os.getenv("FORCE_MONTH")  # e.g., "september"
+    env_day = os.getenv("FORCE_DAY")      # e.g., "4"
 
-    items = fetch_births(month_name, day)
+    if env_month and env_day:
+        month_name = env_month.strip().lower()
+        day = int(env_day)
+        today = datetime.date(datetime.datetime.utcnow().year, datetime.datetime.strptime(month_name[:3], "%b").month, day)
+    else:
+        today = datetime.date.today()
+        month_name = today.strftime("%B").lower()
+        day = today.day
 
-    out_dir = os.path.join("docs", "birthdays")
-    os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, f"{month_slug}-{day}.html")
+    # Scrape
+    birthdays = fetch_births(month_name, day)
 
-    with open(out_file, "w", encoding="utf-8") as f:
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # File name like 'september-4.html'
+    filename = f"{month_name}-{day}.html"
+    filepath = os.path.join(OUTPUT_DIR, filename)
+
+    # Write minimal, safe HTML fragment
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write("<div class='birthdays'>\n")
-        f.write(f"<h3>🎉 Celebrity Birthdays – {month_name} {day:02d}</h3>\n")
+        f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
 
-        if not items:
-            f.write("<p>No birthdays found.</p>\n</div>\n")
-            return
+        if birthdays:
+            f.write("<ul>\n")
+            # Sort by (birth_year ASC), oldest first (optional)
+            for birth_year, age, desc in sorted(birthdays, key=lambda t: t[0]):
+                f.write(f"  <li>{desc} – {age} years old ({birth_year})</li>\n")
+            f.write("</ul>\n")
+        else:
+            f.write("<p>No birthdays found.</p>\n")
 
-        f.write("<ul>\n")
-        for birth_year, age, desc in items:
-            f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
-        f.write("</ul>\n</div>\n")
+        f.write("</div>\n")
+
+    print(f"DEBUG: wrote {filepath}")
 
 if __name__ == "__main__":
     main()
