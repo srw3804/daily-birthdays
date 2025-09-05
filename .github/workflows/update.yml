@@ -2,7 +2,7 @@ name: Update Daily Birthdays
 
 on:
   schedule:
-    - cron: '0 5 * * *'  # 5:00 UTC daily
+    - cron: '5 8 * * *'   # 08:05 UTC daily (change as you like)
   workflow_dispatch:
 
 permissions:
@@ -12,38 +12,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install deps
         run: pip install requests beautifulsoup4
 
       - name: Run birthday scraper
         run: python birthday_scraper.py
 
-      - name: Ensure output folder exists
-        run: mkdir -p docs/birthdays
-
-      - name: Show what was generated (debug)
+      - name: Commit & push if changed
         run: |
-          echo "Tree under docs/"
-          ls -la docs || true
-          echo "Tree under docs/birthdays/"
-          ls -la docs/birthdays || true
-
-      - name: Commit and push updates
-        run: |
-          git config --global user.name 'github-actions'
-          git config --global user.email 'github-actions@github.com'
-          git add -A docs/birthdays || true
-          if ! git diff --cached --quiet; then
-            git commit -m "Daily birthday update"
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+          if ! git diff --quiet; then
+            git add docs/birthdays/*.html
+            git commit -m "Update birthdays $(date -u +%F)"
             git push
-          else
-            echo "No new or changed files to commit."
           fi
