@@ -1,66 +1,89 @@
-import datetime
 import os
+import re
+import datetime
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 HEADERS = {
     "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
 }
 
-def get_birthdays_for_date(month: str, day: int):
+DASH_RE = re.compile(r'^\s*(\d{1,4})\s*[–—-]\s*(.*)$')  # year + dash + text
+
+def _find_births_heading(soup: BeautifulSoup) -> Tag | None:
+    # 1) Normal case: <span id="Births"> inside a heading
+    anchor = soup.select_one('span#Births')
+    if anchor:
+        h = anchor
+        while h and isinstance(h, Tag) and h.name not in ("h2", "h3"):
+            h = h.parent
+        if h and h.name in ("h2", "h3"):
+            return h
+
+    # 2) Fallback: a heading whose text contains "Births"
+    for h in soup.find_all(["h2", "h3"]):
+        if h.get_text(strip=True).lower() == "births" or "births" in h.get_text(" ", strip=True).lower():
+            return h
+
+    return None
+
+def _iter_section_content(start_heading: Tag):
     """
-    Scrape births from:
-    https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{Month}_{Day}
+    Yield siblings after start_heading until the next h2/h3.
+    """
+    node = start_heading.next_sibling
+    while node:
+        if isinstance(node, NavigableString):
+            node = node.next_sibling
+            continue
+        if isinstance(node, Tag) and node.name in ("h2", "h3"):
+            break
+        if isinstance(node, Tag):
+            yield node
+        node = node.next_sibling
+
+def get_birthdays_for_date(month: str, day: int):
+    """Scrape births from:
+       https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{Month}_{Day}
     """
     url = f"https://en.wikipedia.org/wiki/Wikipedia:Selected_anniversaries/{month}_{day}"
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
-    anchor = soup.select_one("span#Births")
-    if not anchor:
-        return []
-
-    # go up to the heading containing the anchor (usually <h2> or <h3>)
-    heading = anchor.parent
-    while heading and heading.name not in ("h2", "h3"):
-        heading = heading.parent
-
+    heading = _find_births_heading(soup)
     if not heading:
         return []
 
     birthdays = []
-    # iterate forward until the next section heading
-    for sib in heading.next_siblings:
-        # stop when we hit another section heading
-        if getattr(sib, "name", None) in ("h2", "h3"):
-            break
-        # collect list items directly under ULs in this section
-        if getattr(sib, "name", None) == "ul":
-            for li in sib.find_all("li", recursive=False):
+    for block in _iter_section_content(heading):
+        # Collect only direct <ul> blocks (there can be multiple)
+        if block.name == "ul":
+            for li in block.find_all("li", recursive=False):
                 text = " ".join(li.get_text(" ", strip=True).split())
-                # split on en dash or em dash
-                parts = (text.split(" – ", 1) if " – " in text else text.split(" — ", 1))
-                if len(parts) == 2:
-                    year_str, description = parts[0].strip(), parts[1].strip()
-                    if year_str.isdigit():
-                        year = int(year_str)
-                        age = datetime.date.today().year - year
-                        birthdays.append((year, age, description))
-
+                m = DASH_RE.match(text)
+                if not m:
+                    continue
+                year_str, desc = m.groups()
+                try:
+                    year = int(year_str)
+                except ValueError:
+                    continue
+                # Compute age (simple)
+                current_year = datetime.date.today().year
+                if 0 < year <= current_year:
+                    age = current_year - year
+                    birthdays.append((year, age, desc))
     return birthdays
 
-# ---------- main: write to docs/birthdays/{month}-{day}.html ----------
+# ---------------- main: write to docs/birthdays/{month}-{day}.html ----------------
 
 today = datetime.date.today()
+month_slug = today.strftime("%B").lower()     # e.g., 'september'
+day_num    = today.day                         # e.g., 4
 
-# For “september-4.html”-style filenames:
-month_slug = today.strftime("%B").lower()
-day_num = today.day
-
-# For URL/page (Wikipedia expects Month capitalized, day without leading zero)
-wiki_month = today.strftime("%B")
-wiki_day = day_num
+wiki_month = today.strftime("%B")              # Wikipedia expects capitalized month
+wiki_day   = day_num
 
 birthday_list = get_birthdays_for_date(wiki_month, wiki_day)
 
