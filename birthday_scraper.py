@@ -1,188 +1,143 @@
-# birthday_scraper.py
-# Generates docs/birthdays/<month>-<day>.html for GitHub Pages.
-# - Parses the Wikipedia "Births" section
-# - Keeps only LIVING people
-# - Keeps entries that contain "American" (including hyphen-American)
-# - Formats: <p><strong>Name</strong> – {age} years old ({year}) – {desc}</p>
-# - Strips all bracketed references like [5], [a], etc.
-
 import os
 import re
-import sys
-import datetime as dt
+import datetime
 import requests
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup
 
-# ------------- Config -------------
-OUTPUT_DIR = "docs/birthdays"
-USER_AGENT = "daily-birthdays-script/1.0 (+https://github.com/srw3804/daily-birthdays)"
-HEADERS = {"User-Agent": USER_AGENT}
-DASH = "–"  # en dash
-# ---------------------------------
+UA = "daily-birthdays/1.0 (+https://github.com/srw3804/daily-birthdays)"
+API = "https://en.wikipedia.org/w/api.php"
 
-def clean_text(s: str) -> str:
-    if not s:
-        return ""
-    # Remove ALL bracketed refs: [5], [12], [a], [citation needed], etc.
-    s = re.sub(r"\[[^\]]*\]", "", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+def wiki_api(params):
+    p = {"format": "json"}
+    p.update(params)
+    r = requests.get(API, params=p, headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    return r.json()
 
-def looks_dead(text: str) -> bool:
-    t = text.lower()
-    death_patterns = [
-        r"\bdied\b",
-        r"\bdeath\b",
-        r"\bd\.\s*\d{3,4}\b",
-        r"\b†\b",
-        r"\b\(d[.)]",
-        r"\b\(died\b",
-        r"\b–\s*\d{3,4}\)",
-    ]
-    return any(re.search(p, t) for p in death_patterns)
+def find_births_section_index(title: str) -> str | None:
+    data = wiki_api({"action": "parse", "page": title, "prop": "sections"})
+    for sec in data.get("parse", {}).get("sections", []):
+        if sec.get("line") == "Births":
+            return sec.get("index")
+    return None
 
-def americanish(text: str) -> bool:
-    return re.search(r"\b[A-Za-z-]*American\b", text) is not None
+def fetch_births_html(title: str, section_index: str) -> str:
+    data = wiki_api({
+        "action": "parse",
+        "page": title,
+        "prop": "text",
+        "section": section_index
+    })
+    return data["parse"]["text"]["*"]
 
-def fix_profession(desc: str) -> str:
-    d = desc.strip()
-    if d.startswith("American "):
-        d = d[len("American "):].strip()
-        d = d[:1].upper() + d[1:] if d else d
-    d = re.sub(r"\s*,\s*", ", ", d)
-    d = re.sub(r"\s*–\s*", f" {DASH} ", d)
-    return clean_text(d)
+def strip_refs_and_footnotes(soup: BeautifulSoup) -> None:
+    # remove citation footnotes like [5] and ref superscripts
+    for sup in soup.select("sup.reference, sup"):
+        sup.decompose()
+    # also drop bracketed numbers that may linger in plain text
+    for t in soup.find_all(text=True):
+        cleaned = re.sub(r"\s*\[\d+\]\s*", " ", t)
+        if cleaned != t:
+            t.replace_with(cleaned)
 
-def parse_birth_li(li_text: str, current_year: int):
-    raw = clean_text(li_text)
+def is_living(text: str) -> bool:
+    # Exclude entries that obviously indicate death
+    return not re.search(r"\b(died|d\.)\b", text, flags=re.IGNORECASE)
 
-    parts = re.split(r"\s[–-]\s", raw, maxsplit=1)
-    if len(parts) != 2:
+def tidy_descriptor(desc: str) -> str:
+    desc = desc.strip(" –-—;,. ")
+    # If descriptor begins with "American " exactly, drop it and capitalize next word
+    if desc.lower().startswith("american "):
+        desc = desc[9:].lstrip()
+        if desc:
+            desc = desc[0].upper() + desc[1:]
+    return desc
+
+def parse_birth_item(li) -> tuple[int, str, str] | None:
+    """
+    Return (year, name, descriptor) or None if we can't parse / not living.
+    """
+    # clone & clean a working copy
+    li = li.__copy__()
+    strip_refs_and_footnotes(li)
+
+    text = li.get_text(" ", strip=True)
+    # Expect pattern: "YEAR – Name, descriptor ..." (varies—but year is at start)
+    m_year = re.match(r"^(\d{1,4})\s*[–-]\s*(.+)$", text)
+    if not m_year:
+        return None
+    year = int(m_year.group(1))
+    rest = m_year.group(2)
+
+    if not is_living(rest):
         return None
 
-    year_str, right = parts[0].strip(), parts[1].strip()
-
-    if not re.match(r"^\d{3,4}$", year_str):
-        return None
-    birth_year = int(year_str)
-
-    if "," in right:
-        name, desc = right.split(",", 1)
-        name = clean_text(name)
-        desc = clean_text(desc)
+    # Split name vs descriptor at the first comma
+    if "," in rest:
+        name, desc = rest.split(",", 1)
     else:
-        tokens = right.split()
-        if len(tokens) < 2:
-            return None
-        name = clean_text(" ".join(tokens[:2]))
-        desc = clean_text(" ".join(tokens[2:]))
+        # Fallback if no comma—use first en dash OR whole string
+        parts = re.split(r"\s[–-]\s", rest, maxsplit=1)
+        name = parts[0]
+        desc = parts[1] if len(parts) == 2 else ""
 
-    if looks_dead(right):
-        return None
-    if not americanish(right):
-        return None
+    name = name.strip()
+    desc = tidy_descriptor(desc)
 
-    age = current_year - birth_year
-    desc = fix_profession(desc)
-    return birth_year, name, desc, age
+    return (year, name, desc)
 
-def find_births_section(soup: BeautifulSoup) -> list[Tag]:
-    """
-    Find the 'Births' h2 (various HTML structures) and gather all <li> items
-    from subsequent <ul> siblings up to the next <h2>.
-    """
-    # Try several robust ways to find the Births header
-    header = (
-        soup.select_one("h2#Births") or
-        soup.select_one("h2 > span#Births") or
-        soup.select_one("span.mw-headline#Births")
-    )
+def format_entry(year: int, name: str, desc: str, target_date: datetime.date) -> str:
+    age = target_date.year - year
+    # Each entry as its own paragraph; name in bold
+    if desc:
+        return f"<p><strong>{name}</strong> – {age} years old ({year}) – {desc}</p>"
+    else:
+        return f"<p><strong>{name}</strong> – {age} years old ({year})</p>"
 
-    # If we only got the span, climb to the h2
-    if header and header.name != "h2":
-        p = header
-        while p and p.name != "h2":
-            p = p.parent
-        header = p
-
-    # Fallback: find an h2 whose visible headline text is "Births"
-    if not header:
-        for h2 in soup.select("h2"):
-            span = h2.find("span", class_="mw-headline")
-            text = (span.get_text(strip=True) if span else h2.get_text(strip=True)) or ""
-            if text.lower() == "births":
-                header = h2
-                break
-
-    if not header:
+def generate_for(month: int, day: int) -> list[str]:
+    title = f"{datetime.date(2000, month, 1).strftime('%B')} {day}"
+    sec_index = find_births_section_index(title)
+    if not sec_index:
+        print(f"DEBUG: couldn't find Births section index for {title}")
         return []
 
-    lis: list[Tag] = []
-    node = header.next_sibling
-    while node:
-        if isinstance(node, NavigableString):
-            node = node.next_sibling
+    html = fetch_births_html(title, sec_index)
+    soup = BeautifulSoup(html, "html.parser")
+
+    items = soup.select("li")
+    print(f"DEBUG: collected {len(items)} raw <li> items in section")
+
+    target_date = datetime.date(datetime.date.today().year, month, day)
+    out = []
+    for li in items:
+        parsed = parse_birth_item(li)
+        if not parsed:
             continue
-        if isinstance(node, Tag):
-            if node.name == "h2":
-                break
-            if node.name == "ul":
-                lis.extend(node.find_all("li", recursive=False))
-        node = node.next_sibling
-    return lis
+        year, name, desc = parsed
+        out.append(format_entry(year, name, desc, target_date))
 
-def build_html(entries):
-    lines = []
-    for year, name, desc, age in entries:
-        line = (
-            f"<p><strong>{name}</strong> {DASH} {age} years old ({year})"
-            + (f" {DASH} {desc}" if desc else "")
-            + "</p>"
-        )
-        lines.append(line)
-    return "<div class='birthdays'>\n" + "\n".join(lines) + "\n</div>\n"
-
-def main():
-    today = dt.date.today()
-    env_month = os.getenv("BIRTHDAY_MONTH")
-    env_day = os.getenv("BIRTHDAY_DAY")
-
-    month_name = (env_month or today.strftime("%B")).strip()
-    day = int(env_day or today.day)
-
-    url = f"https://en.wikipedia.org/wiki/{month_name}_{day}"
-    print(f"DEBUG: fetching birthdays for {month_name} {day} -> {url}")
-
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.content, "html.parser")
-
-    li_tags = find_births_section(soup)
-    print(f"DEBUG: found {len(li_tags)} raw <li> items under Births")
-
-    current_year = today.year
-    entries = []
-    for li in li_tags:
-        txt = li.get_text(" ", strip=True)
-        parsed = parse_birth_li(txt, current_year)
-        if parsed:
-            entries.append(parsed)
-
-    print(f"DEBUG: parsed {len(entries)} living American(-ish) birthdays")
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    file_name = f"{month_name.lower()}-{day}.html"
-    out_path = os.path.join(OUTPUT_DIR, file_name)
-
-    html = build_html(entries)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print(f"DEBUG: wrote {out_path} ({len(entries)} entries)")
+    print(f"DEBUG: parsed {len(out)} living birthdays")
+    return out
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Allow override for testing via env, otherwise "today"
+    today = datetime.date.today()
+    month = int(os.getenv("BIRTH_MONTH") or today.strftime("%m"))
+    day = int(os.getenv("BIRTH_DAY") or today.strftime("%d"))
+
+    entries = generate_for(month, day)
+
+    # Write to docs/birthdays/{monthname-lower}-{day}.html with *no* heading
+    outdir = os.path.join("docs", "birthdays")
+    os.makedirs(outdir, exist_ok=True)
+    month_name = datetime.date(2000, month, 1).strftime("%B").lower()
+    path = os.path.join(outdir, f"{month_name}-{day}.html")
+
+    with open(path, "w", encoding="utf-8") as f:
+        if entries:
+            f.write("\n".join(entries) + "\n")
+        else:
+            # Keep file but empty body if none; shortcode will just render nothing
+            f.write("")
+
+    print(f"DEBUG: wrote {path} ({len(entries)} entries)")
