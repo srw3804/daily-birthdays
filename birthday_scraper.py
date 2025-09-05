@@ -31,64 +31,85 @@ def fetch_births_html(title: str, section_index: str) -> str:
     return data["parse"]["text"]["*"]
 
 def strip_refs_and_footnotes(soup: BeautifulSoup) -> None:
-    # remove citation footnotes like [5] and ref superscripts
     for sup in soup.select("sup.reference, sup"):
         sup.decompose()
-    # also drop bracketed numbers that may linger in plain text
-    for t in soup.find_all(text=True):
+    for t in soup.find_all(string=True):
         cleaned = re.sub(r"\s*\[\d+\]\s*", " ", t)
         if cleaned != t:
             t.replace_with(cleaned)
 
+# -------- Filters --------
+
+_dead_patterns = [
+    r"\b(died|death)\b",
+    r"\b(d\.)\s*\d",          # d. 1988
+    r"\((?:d|died)\s*\d",     # (d 1941)  (died 1999)
+    r"†\s*\d",                # crosses sometimes used
+]
+_dead_re = re.compile("|".join(_dead_patterns), re.IGNORECASE)
+
 def is_living(text: str) -> bool:
-    # Exclude entries that obviously indicate death
-    return not re.search(r"\b(died|d\.)\b", text, flags=re.IGNORECASE)
+    return _dead_re.search(text) is None
+
+def is_americanish(desc: str) -> bool:
+    # Accept if "American" appears anywhere OR any -American hyphenated identity.
+    # Evaluate BEFORE we remove a leading "American ".
+    return re.search(r"\bAmerican\b|-American\b", desc) is not None
 
 def tidy_descriptor(desc: str) -> str:
     desc = desc.strip(" –-—;,. ")
-    # If descriptor begins with "American " exactly, drop it and capitalize next word
+    # Remove a LEADING "American " for nicer output; keep hyphenated identities.
     if desc.lower().startswith("american "):
         desc = desc[9:].lstrip()
         if desc:
             desc = desc[0].upper() + desc[1:]
     return desc
 
+# -------- Parsing --------
+
 def parse_birth_item(li) -> tuple[int, str, str] | None:
     """
-    Return (year, name, descriptor) or None if we can't parse / not living.
+    Return (year, name, descriptor) or None if can't parse / not living / not American.
     """
-    # clone & clean a working copy
-    li = li.__copy__()
-    strip_refs_and_footnotes(li)
+    work = li.__copy__()
+    strip_refs_and_footnotes(work)
 
-    text = li.get_text(" ", strip=True)
-    # Expect pattern: "YEAR – Name, descriptor ..." (varies—but year is at start)
+    text = work.get_text(" ", strip=True)
+
+    # YEAR – rest
     m_year = re.match(r"^(\d{1,4})\s*[–-]\s*(.+)$", text)
     if not m_year:
         return None
     year = int(m_year.group(1))
     rest = m_year.group(2)
 
+    # If the line explicitly contains a death marker, skip it.
     if not is_living(rest):
         return None
 
-    # Split name vs descriptor at the first comma
+    # Remove parenthetical death snippets anywhere, e.g. "(d 1941)" "(died 2001)"
+    rest = re.sub(r"\([^)]*\b(?:d|died)\b[^)]*\)", "", rest, flags=re.IGNORECASE).strip()
+
+    # Split into name + descriptor
     if "," in rest:
         name, desc = rest.split(",", 1)
     else:
-        # Fallback if no comma—use first en dash OR whole string
         parts = re.split(r"\s[–-]\s", rest, maxsplit=1)
         name = parts[0]
         desc = parts[1] if len(parts) == 2 else ""
 
     name = name.strip()
-    desc = tidy_descriptor(desc)
+    desc_original = desc.strip()
 
+    # Require American(-ish)
+    if not is_americanish(desc_original):
+        return None
+
+    desc = tidy_descriptor(desc_original)
     return (year, name, desc)
 
 def format_entry(year: int, name: str, desc: str, target_date: datetime.date) -> str:
     age = target_date.year - year
-    # Each entry as its own paragraph; name in bold
     if desc:
         return f"<p><strong>{name}</strong> – {age} years old ({year}) – {desc}</p>"
     else:
@@ -103,7 +124,6 @@ def generate_for(month: int, day: int) -> list[str]:
 
     html = fetch_births_html(title, sec_index)
     soup = BeautifulSoup(html, "html.parser")
-
     items = soup.select("li")
     print(f"DEBUG: collected {len(items)} raw <li> items in section")
 
@@ -116,28 +136,23 @@ def generate_for(month: int, day: int) -> list[str]:
         year, name, desc = parsed
         out.append(format_entry(year, name, desc, target_date))
 
-    print(f"DEBUG: parsed {len(out)} living birthdays")
+    print(f"DEBUG: parsed {len(out)} living American birthdays")
     return out
 
 if __name__ == "__main__":
-    # Allow override for testing via env, otherwise "today"
+    # Use today by default; allow overrides for manual tests
     today = datetime.date.today()
     month = int(os.getenv("BIRTH_MONTH") or today.strftime("%m"))
-    day = int(os.getenv("BIRTH_DAY") or today.strftime("%d"))
+    day   = int(os.getenv("BIRTH_DAY") or today.strftime("%d"))
 
     entries = generate_for(month, day)
 
-    # Write to docs/birthdays/{monthname-lower}-{day}.html with *no* heading
     outdir = os.path.join("docs", "birthdays")
     os.makedirs(outdir, exist_ok=True)
     month_name = datetime.date(2000, month, 1).strftime("%B").lower()
     path = os.path.join(outdir, f"{month_name}-{day}.html")
 
     with open(path, "w", encoding="utf-8") as f:
-        if entries:
-            f.write("\n".join(entries) + "\n")
-        else:
-            # Keep file but empty body if none; shortcode will just render nothing
-            f.write("")
+        f.write("\n".join(entries) + ("\n" if entries else ""))
 
     print(f"DEBUG: wrote {path} ({len(entries)} entries)")
