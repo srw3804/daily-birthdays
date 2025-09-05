@@ -2,6 +2,11 @@ import datetime
 import requests
 from bs4 import BeautifulSoup
 import os
+import re
+
+def clean_text(text):
+    """Remove Wikipedia reference markers like [5], [6]."""
+    return re.sub(r'\[\d+\]', '', text).strip()
 
 def get_birthdays(month: str, day: int):
     url = f"https://en.wikipedia.org/wiki/{month}_{day}"
@@ -30,7 +35,7 @@ def get_birthdays(month: str, day: int):
     birthdays = []
     current_year = datetime.datetime.now().year
     for item in items:
-        text = item.get_text(" ", strip=True)
+        text = clean_text(item.get_text(" ", strip=True))
         parts = text.split(" – ", 1)
         if len(parts) == 2:
             year_str, description = parts
@@ -39,7 +44,9 @@ def get_birthdays(month: str, day: int):
                 age = current_year - birth_year
                 # Only keep if still alive
                 if "died" not in description.lower():
-                    birthdays.append((birth_year, age, description.strip()))
+                    # Format: Name – age years old (year) – description
+                    formatted = f"{description} – {age} years old ({birth_year})"
+                    birthdays.append(formatted)
             except ValueError:
                 continue
 
@@ -69,8 +76,8 @@ with open(file_path, "w", encoding="utf-8") as f:
     f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
     if birthday_list:
         f.write("<ul>\n")
-        for birth_year, age, desc in birthday_list:
-            f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
+        for line in birthday_list:
+            f.write(f"<li>{line}</li>\n")
         f.write("</ul>\n")
     else:
         f.write("<p>No living birthdays found.</p>\n")
