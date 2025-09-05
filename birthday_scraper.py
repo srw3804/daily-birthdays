@@ -14,6 +14,7 @@ def get_birthdays(month: str, day: int):
     until we reach the next <h2> section. Only keep lines that start with a year.
     """
     url = f"https://en.wikipedia.org/wiki/{month}_{day}"
+    print(f"DEBUG: fetching {url}")
     headers = {
         "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
     }
@@ -28,29 +29,28 @@ def get_birthdays(month: str, day: int):
         return []
 
     # From the parent (usually an <h2>), walk forward until the next <h2>.
-    # Gather <ul> blocks we encounter in that range.
     birthdays = []
     current = births_span.parent
     ul_count = 0
     li_seen = 0
 
     for tag in current.find_all_next():
-        # Stop when we hit the next main section
         if tag.name == "h2":
             break
 
         if tag.name == "ul":
             ul_count += 1
-            # Only take direct li children to avoid double-counting
             for li in tag.find_all("li", recursive=False):
                 text = li.get_text(" ", strip=True)
-                # Match a leading year (3–4 digits) followed by a dash/en dash
+
+                # Match a leading year (3–4 digits) then a dash/en dash
                 m = re.match(r"^(\d{3,4})\s*[–-]\s*(.+)", text)
                 if not m:
                     continue
 
                 year_str, desc = m.group(1), m.group(2).strip()
-                # Extra sanity check: make sure description has letters
+
+                # Require some letters in the description (filters “(2)” bucket counts)
                 if not re.search(r"[A-Za-z]", desc):
                     continue
 
@@ -69,14 +69,13 @@ def get_birthdays(month: str, day: int):
 
 # -------- MAIN --------
 
-# Use your timezone so the date matches your posts
 today = datetime.datetime.now(ZoneInfo("America/Detroit")).date()
 month = today.strftime("%B")      # e.g., "September"
 day = today.day                   # e.g., 5
 
 birthday_list = get_birthdays(month, day)
 
-# Where GitHub Pages serves from (Repo Settings → Pages → /docs)
+# Where GitHub Pages serves from
 output_folder = "docs/birthdays"
 os.makedirs(output_folder, exist_ok=True)
 
