@@ -1,91 +1,98 @@
+# birthday_scraper.py
 import os
 import re
 import datetime
 import requests
+from bs4 import BeautifulSoup
 
-API = "https://en.wikipedia.org/w/api.php"
-HEADERS = {
-    "User-Agent": "daily-birthdays-script/1.0 (https://github.com/srw3804/daily-birthdays)"
-}
+USER_AGENT = "daily-birthdays-script/1.0 (+https://github.com/srw3804/daily-birthdays)"
 
-# * 1965 – Person (…)
-LINE_RE = re.compile(r'^\*\s*(\d{1,4})\s*[–—-]\s*(.+)$')
+def fetch_birthdays_for(month_name: str, day: int):
+    """
+    Fetch birthdays for a given month/day from https://en.wikipedia.org/wiki/Month_Day
+    Returns a list of tuples: (birth_year:int, age:int, description:str)
+    """
+    # Wikipedia day page (NOT the Selected_anniversaries page)
+    url = f"https://en.wikipedia.org/wiki/{month_name}_{day}"
 
-def find_births_section_index(month_cap: str, day: int) -> str | None:
-    page = f"{month_cap}_{day}"
-    params = {
-        "action": "parse",
-        "page": page,
-        "prop": "sections",
-        "format": "json",
-        "formatversion": "2",
-    }
-    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    sections = r.json().get("parse", {}).get("sections", [])
-    for s in sections:
-        if s.get("line", "").strip().lower() == "births":
-            return s.get("index")
-    return None
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.content, "html.parser")
 
-def fetch_births_wikitext(month_cap: str, day: int) -> str | None:
-    idx = find_births_section_index(month_cap, day)
-    if not idx:
-        return None
-    params = {
-        "action": "parse",
-        "page": f"{month_cap}_{day}",
-        "section": idx,
-        "prop": "wikitext",
-        "format": "json",
-        "formatversion": "2",
-    }
-    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json().get("parse", {}).get("wikitext")
+    # Find the "Births" section (it's usually an <h2> with a <span id="Births">)
+    births_anchor = soup.find("span", {"id": "Births"})
+    if not births_anchor:
+        return []
 
-def parse_births_from_wikitext(wikitext: str) -> list[tuple[int, int, str]]:
-    out: list[tuple[int, int, str]] = []
-    current_year = datetime.date.today().year
-    for raw in wikitext.splitlines():
-        m = LINE_RE.match(raw.strip())
-        if not m:
+    # Collect all <li> items under the Births section until the next <h2>
+    birthdays = []
+    ul = births_anchor.find_parent().find_next_sibling()
+
+    lis = []
+    while ul and ul.name != "h2":
+        if ul.name == "ul":
+            lis.extend(ul.find_all("li", recursive=False))
+        ul = ul.find_next_sibling()
+
+    # Split on first dash (en dash, em dash, or hyphen)
+    dash_pattern = re.compile(r"\s*[–—-]\s*", re.UNICODE)
+    ref_pattern = re.compile(r"\[\d+\]")  # remove citation markers like [1], [12]
+
+    current_year = datetime.datetime.utcnow().year
+
+    for li in lis:
+        text = ref_pattern.sub("", li.get_text(" ", strip=True))
+        parts = dash_pattern.split(text, maxsplit=1)
+        if len(parts) != 2:
             continue
-        year_str, desc = m.groups()
+        year_str, description = parts[0].strip(), parts[1].strip()
+
+        # Year should be an int; skip ranges like "c. 350" or "AD 12"
         try:
-            year = int(year_str)
-            if 0 < year <= current_year:
-                out.append((year, current_year - year, desc.strip()))
+            birth_year = int(re.sub(r"[^\d]", "", year_str))
         except ValueError:
             continue
-    return out
+
+        # Compute age (skip obviously future/invalid years)
+        if 0 < birth_year <= current_year:
+            age = current_year - birth_year
+        else:
+            continue
+
+        birthdays.append((birth_year, age, description))
+
+    return birthdays
 
 def main():
-    today = datetime.date.today()
-    month_cap = today.strftime("%B")       # "September"
-    month_slug = month_cap.lower()         # "september"
-    day_num = today.day
+    # Today's date (UTC)
+    today = datetime.datetime.utcnow().date()
+    month_name_cap = today.strftime("%B")       # e.g., "September"
+    month_slug = month_name_cap.lower()         # e.g., "september"
+    day = today.day
 
-    wikitext = fetch_births_wikitext(month_cap, day_num)
-    birthdays = parse_births_from_wikitext(wikitext or "")
+    items = fetch_birthdays_for(month_name_cap, day)
 
-    out_dir = "docs/birthdays"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{month_slug}-{day_num}.html")
+    # Ensure output folder exists for GitHub Pages
+    output_dir = os.path.join("docs", "birthdays")
+    os.makedirs(output_dir, exist_ok=True)
 
+    # File name like "september-4.html"
+    filename = f"{month_slug}-{day}.html"
+    out_path = os.path.join(output_dir, filename)
+
+    # Write HTML
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("<div class='birthdays'>\n")
-        f.write(f"<h3>🎉 Celebrity Birthdays – {today.strftime('%B %d')}</h3>\n")
-        if birthdays:
-            f.write("<ul>\n")
-            for year, age, desc in birthdays:
-                f.write(f"<li>{desc} – {age} years old ({year})</li>\n")
-            f.write("</ul>\n")
-        else:
-            f.write("<p>No birthdays found.</p>\n")
-        f.write("</div>\n")
+        f.write(f"<h3>🎉 Celebrity Birthdays – {month_name_cap} {day:02d}</h3>\n")
 
-    print(f"Wrote {len(birthdays)} items to {out_path}")
+        if not items:
+            f.write("<p>No birthdays found.</p>\n</div>\n")
+            return
+
+        f.write("<ul>\n")
+        for birth_year, age, desc in items:
+            f.write(f"<li>{desc} – {age} years old ({birth_year})</li>\n")
+        f.write("</ul>\n</div>\n")
 
 if __name__ == "__main__":
     main()
