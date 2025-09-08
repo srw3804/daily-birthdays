@@ -1,5 +1,6 @@
 # birthday_scraper.py
 # Writes docs/birthdays/<month>-<day>.html for *today and tomorrow* each run.
+# Test version: celebrity names link to their Wikipedia pages.
 
 import os
 import re
@@ -34,14 +35,12 @@ def fetch_births_html(title: str, section_index: str) -> str:
         "action": "parse", "page": title, "prop": "text",
         "section": section_index, "redirects": 1
     })
-    # API returns HTML string in parse.text
     t = data.get("parse", {}).get("text", "")
     if isinstance(t, dict):
         return t.get("*", "")
     return t or ""
 
 def strip_refs_and_footnotes(soup: BeautifulSoup) -> None:
-    # Remove <sup> references and any bracketed remnants like [5], [citation needed]
     for sup in soup.select("sup.reference, sup"):
         sup.decompose()
     for node in soup.find_all(string=True):
@@ -60,11 +59,9 @@ def is_living(text: str) -> bool:
     return _DEAD_RE.search(text) is None
 
 def is_americanish(text: str) -> bool:
-    # Allow "American" anywhere, including hyphenated like "Chinese-American"
     return re.search(r"\bAmerican\b|-American\b", text, re.IGNORECASE) is not None
 
 def tidy_descriptor(desc: str) -> str:
-    # Trim, remove leading "American " (but keep hyphen-American), and capitalize next word.
     d = re.sub(r"\s+", " ", desc).strip(" –-—;,. ").strip()
     if d.lower().startswith("american "):
         d = d[9:].lstrip()
@@ -75,16 +72,12 @@ def tidy_descriptor(desc: str) -> str:
 # --- Parsing ---
 
 def parse_birth_item(li) -> Optional[Tuple[int, str, str]]:
-    """
-    Return (year, name, descriptor) or None if can't parse / not living / not American.
-    """
     work = li.__copy__()
     strip_refs_and_footnotes(work)
     text = work.get_text(" ", strip=True)
     if not text:
         return None
 
-    # Expect "YEAR – rest"
     m_year = re.match(r"^(\d{3,4})\s*[–-]\s*(.+)$", text)
     if not m_year:
         return None
@@ -95,10 +88,8 @@ def parse_birth_item(li) -> Optional[Tuple[int, str, str]]:
     if not is_living(rest):
         return None
 
-    # Remove any parenthetical death note fragments
     rest = re.sub(r"\([^)]*\b(died|d\.)[^)]*\)", "", rest, flags=re.IGNORECASE).strip()
 
-    # Split name + descriptor at first comma (fallback to dash)
     if "," in rest:
         name, desc = rest.split(",", 1)
     else:
@@ -117,10 +108,13 @@ def parse_birth_item(li) -> Optional[Tuple[int, str, str]]:
 
 def format_entry(year: int, name: str, desc: str, target_date: dt.date) -> str:
     age = target_date.year - year
+    # Build Wikipedia link for the name
+    wiki_name = name.strip().replace(" ", "_")
+    url = f"https://en.wikipedia.org/wiki/{wiki_name}"
     if desc:
-        return f"<p><strong>{name}</strong> {DASH} {age} years old ({year}) {DASH} {desc}</p>"
+        return f"<p><strong><a href='{url}' target='_blank' rel='noopener'>{name}</a></strong> {DASH} {age} years old ({year}) {DASH} {desc}</p>"
     else:
-        return f"<p><strong>{name}</strong> {DASH} {age} years old ({year})</p>"
+        return f"<p><strong><a href='{url}' target='_blank' rel='noopener'>{name}</a></strong> {DASH} {age} years old ({year})</p>"
 
 # --- Generation ---
 
@@ -128,7 +122,6 @@ def month_name_from_int(m: int) -> str:
     return dt.date(2000, m, 1).strftime("%B")
 
 def title_from_date(d: dt.date) -> str:
-    # Wikipedia API title expects "Month Day" (e.g., "September 6")
     return f"{d.strftime('%B')} {d.day}"
 
 def generate_for_date(d: dt.date) -> List[str]:
@@ -171,8 +164,6 @@ def write_fragment(d: dt.date, entries: List[str]) -> None:
 # --- Main ---
 
 if __name__ == "__main__":
-    # Allow manual overrides for testing through environment variables
-    # If you set BIRTH_MONTH / BIRTH_DAY, it will generate that date *and* the next day.
     today = dt.date.today()
     if os.getenv("BIRTH_MONTH") and os.getenv("BIRTH_DAY"):
         m = int(os.getenv("BIRTH_MONTH"))
@@ -181,8 +172,7 @@ if __name__ == "__main__":
     else:
         base = today
 
-    # Generate TODAY and TOMORROW to avoid UTC/local drift gaps
-    for offset in (0, 1):
+    for offset in (0, 1):  # today and tomorrow
         target = base + dt.timedelta(days=offset)
         entries = generate_for_date(target)
         write_fragment(target, entries)
